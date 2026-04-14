@@ -6,8 +6,8 @@ from datamodel import Order, OrderDepth, Symbol, TradingState
 
 # Per-product config. slope is drift in price per tick; target is desired inventory.
 PRODUCT_CONFIG = {
-    "ASH_COATED_OSMIUM":   {"slope": 0.0,   "target": 0,  "limit": 50, "fixed_fair": 10000.0},
-    "INTARIAN_PEPPER_ROOT": {"slope": 0.001, "target": 20, "limit": 50, "fixed_fair": None},
+    "ASH_COATED_OSMIUM":   {"slope": 0.0,   "target": 0,  "limit": 80, "fixed_fair": 10000.0},
+    "INTARIAN_PEPPER_ROOT": {"slope": 0.001, "target": 20, "limit": 80, "fixed_fair": None},
 }
 TRADED_PRODUCTS = set(PRODUCT_CONFIG.keys())
 
@@ -80,14 +80,19 @@ class Trader:
 
         result = {}
 
+        # Exit near end of run. Live runs ~100k ticks; backtest runs ~1M.
+        # Exit in the last 1k ticks of either length. On backtest the trader will
+        # briefly flatten at 99k-100k then re-accumulate for the remaining 900k —
+        # cost of that detour is trivial (~50 seashells of missed drift).
+        ts = state.timestamp
+        in_exit_window = (99_000 <= ts < 100_000) or ts >= 999_000
+
         for product in state.order_depths:
             if product not in TRADED_PRODUCTS:
                 continue
 
             cfg = PRODUCT_CONFIG[product]
             limit = cfg["limit"]
-            target = cfg["target"]
-            slope = cfg["slope"]
 
             order_depth: OrderDepth = state.order_depths[product]
             orders: List[Order] = []
@@ -100,98 +105,53 @@ class Trader:
             best_bid = max(order_depth.buy_orders.keys())
             best_ask = min(order_depth.sell_orders.keys())
 
-            fair = compute_fair(product, order_depth, state.timestamp, ema_state)
-            if fair is None:
-                result[product] = []
-                continue
-
-            buy_rate, sell_rate = update_fill_rates(product, state, ema_state)
-
-            # Direction-specific fair: account for drift over the expected unwind time.
-            # Buying pushes pos up; to unwind back to target we need to sell (pos - target) units.
-            # Selling pushes pos down; to unwind we need to buy (target - pos) units.
-            def fair_for_buy(current_pos: int) -> float:
-                new_pos = current_pos + 1
-                need_to_sell = max(new_pos - target, 0)
-                tau = need_to_sell / sell_rate
-                return fair + slope * tau
-
-            def fair_for_sell(current_pos: int) -> float:
-                new_pos = current_pos - 1
-                need_to_buy = max(target - new_pos, 0)
-                tau = need_to_buy / buy_rate
-                return fair + slope * tau
-
-            # ---- TAKE ----
-            for ask_price in sorted(order_depth.sell_orders.keys()):
-                if pos >= limit:
-                    break
-                if ask_price < fair_for_buy(pos):
-                    ask_vol = abs(order_depth.sell_orders[ask_price])
-                    buy_qty = min(ask_vol, limit - pos)
-                    if buy_qty > 0:
+            if product == "ASH_COATED_OSMIUM":
+                # No drift — classic market making around 10000.
+                # Cap total buy/sell qty against pos_start (worst-case one-sided fill).
+                fair = 10000
+                pos_start = pos
+                buy_budget = limit - pos_start   # max we can buy
+                sell_budget = limit + pos_start  # max we can sell
+                for ask_price in sorted(order_depth.sell_orders.keys()):
+                    if ask_price < fair and buy_budget > 0:
+                        ask_vol = abs(order_depth.sell_orders[ask_price])
+                        buy_qty = min(ask_vol, buy_budget)
                         orders.append(Order(product, ask_price, buy_qty))
-                        pos += buy_qty
-
-            for bid_price in sorted(order_depth.buy_orders.keys(), reverse=True):
-                if pos <= -limit:
-                    break
-                if bid_price > fair_for_sell(pos):
-                    bid_vol = order_depth.buy_orders[bid_price]
-                    sell_qty = min(bid_vol, limit + pos)
-                    if sell_qty > 0:
+                        buy_budget -= buy_qty
+                for bid_price in sorted(order_depth.buy_orders.keys(), reverse=True):
+                    if bid_price > fair and sell_budget > 0:
+                        bid_vol = order_depth.buy_orders[bid_price]
+                        sell_qty = min(bid_vol, sell_budget)
                         orders.append(Order(product, bid_price, -sell_qty))
-                        pos -= sell_qty
-
-            # ---- MAKE ----
-            fb = fair_for_buy(pos)
-            fs = fair_for_sell(pos)
-
-            penny_bid = best_bid + 1
-            penny_ask = best_ask - 1
-
-            # quotes must be +EV given direction-specific fair
-            max_bid = int(fb) if fb > int(fb) else int(fb) - 1
-            min_ask = int(fs) + 1 if fs > int(fs) else int(fs) + 1
-
-            if penny_bid > max_bid:
-                penny_bid = max_bid
-            if penny_ask < min_ask:
-                penny_ask = min_ask
-
-            if penny_bid >= penny_ask:
-                penny_bid = max_bid
-                penny_ask = min_ask
-                if penny_bid >= penny_ask:
-                    penny_ask = penny_bid + 1
-
-            # skew sizing toward target inventory: full room on the favored side, half on the other
-            buy_room = limit - pos
-            sell_room = limit + pos
-            if pos < target:
-                buy_qty_total = buy_room
-                sell_qty_total = sell_room // 2
-            elif pos > target:
-                buy_qty_total = buy_room // 2
-                sell_qty_total = sell_room
+                        sell_budget -= sell_qty
+                penny_bid = min(best_bid + 1, fair - 1)
+                penny_ask = max(best_ask - 1, fair + 1)
+                if buy_budget > 0:
+                    orders.append(Order(product, penny_bid, buy_budget))
+                if sell_budget > 0:
+                    orders.append(Order(product, penny_ask, -sell_budget))
+            elif in_exit_window:
+                # Unwind by posting passive offers — save the spread vs. hitting bids.
+                if pos > 0:
+                    orders.append(Order(product, best_ask - 1, -pos))
+                elif pos < 0:
+                    orders.append(Order(product, best_bid + 1, -pos))
             else:
-                buy_qty_total = buy_room
-                sell_qty_total = sell_room
-
-            if buy_qty_total > 0:
-                lvl1 = buy_qty_total // 2
-                lvl2 = buy_qty_total - lvl1
-                if lvl1 > 0:
-                    orders.append(Order(product, penny_bid, lvl1))
-                if lvl2 > 0:
-                    orders.append(Order(product, penny_bid - 1, lvl2))
-            if sell_qty_total > 0:
-                lvl1 = sell_qty_total // 2
-                lvl2 = sell_qty_total - lvl1
-                if lvl1 > 0:
-                    orders.append(Order(product, penny_ask, -lvl1))
-                if lvl2 > 0:
-                    orders.append(Order(product, penny_ask + 1, -lvl2))
+                # EV threshold: lift any ask <= fair + slope * ticks_until_exit.
+                # Exit horizon: 99k (live) or 999k (backtest), whichever is next.
+                fair = compute_fair(product, order_depth, ts, ema_state)
+                exit_ts = 99_000 if ts < 99_000 else 999_000
+                ticks_to_exit = max(0, exit_ts - ts)
+                lift_threshold = fair + cfg["slope"] * ticks_to_exit
+                for ask_price in sorted(order_depth.sell_orders.keys()):
+                    if ask_price <= lift_threshold and pos < limit:
+                        ask_vol = abs(order_depth.sell_orders[ask_price])
+                        buy_qty = min(ask_vol, limit - pos)
+                        if buy_qty > 0:
+                            orders.append(Order(product, ask_price, buy_qty))
+                            pos += buy_qty
+                if pos < limit:
+                    orders.append(Order(product, best_bid + 1, limit - pos))
 
             result[product] = orders
 
