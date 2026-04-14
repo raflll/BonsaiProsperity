@@ -7,7 +7,7 @@ from datamodel import Order, OrderDepth, Symbol, TradingState
 # Per-product config. slope is drift in price per tick; target is desired inventory.
 PRODUCT_CONFIG = {
     "ASH_COATED_OSMIUM":   {"slope": 0.0,   "target": 0,  "limit": 80, "fixed_fair": 10000.0},
-    "INTARIAN_PEPPER_ROOT": {"slope": 0.001, "target": 20, "limit": 80, "fixed_fair": None},
+    "INTARIAN_PEPPER_ROOT": {"slope": 0.001, "target": 80, "limit": 80, "fixed_fair": None},
 }
 TRADED_PRODUCTS = set(PRODUCT_CONFIG.keys())
 
@@ -93,6 +93,7 @@ class Trader:
 
             cfg = PRODUCT_CONFIG[product]
             limit = cfg["limit"]
+            target = cfg["target"]
 
             order_depth: OrderDepth = state.order_depths[product]
             orders: List[Order] = []
@@ -106,24 +107,11 @@ class Trader:
             best_ask = min(order_depth.sell_orders.keys())
 
             if product == "ASH_COATED_OSMIUM":
-                # No drift — classic market making around 10000.
-                # Cap total buy/sell qty against pos_start (worst-case one-sided fill).
+                # Passive MM only — never cross the spread. Penny in on both sides.
                 fair = 10000
                 pos_start = pos
-                buy_budget = limit - pos_start   # max we can buy
-                sell_budget = limit + pos_start  # max we can sell
-                for ask_price in sorted(order_depth.sell_orders.keys()):
-                    if ask_price < fair and buy_budget > 0:
-                        ask_vol = abs(order_depth.sell_orders[ask_price])
-                        buy_qty = min(ask_vol, buy_budget)
-                        orders.append(Order(product, ask_price, buy_qty))
-                        buy_budget -= buy_qty
-                for bid_price in sorted(order_depth.buy_orders.keys(), reverse=True):
-                    if bid_price > fair and sell_budget > 0:
-                        bid_vol = order_depth.buy_orders[bid_price]
-                        sell_qty = min(bid_vol, sell_budget)
-                        orders.append(Order(product, bid_price, -sell_qty))
-                        sell_budget -= sell_qty
+                buy_budget = limit - pos_start
+                sell_budget = limit + pos_start
                 penny_bid = min(best_bid + 1, fair - 1)
                 penny_ask = max(best_ask - 1, fair + 1)
                 if buy_budget > 0:
@@ -137,21 +125,9 @@ class Trader:
                 elif pos < 0:
                     orders.append(Order(product, best_bid + 1, -pos))
             else:
-                # EV threshold: lift any ask <= fair + slope * ticks_until_exit.
-                # Exit horizon: 99k (live) or 999k (backtest), whichever is next.
-                fair = compute_fair(product, order_depth, ts, ema_state)
-                exit_ts = 99_000 if ts < 99_000 else 999_000
-                ticks_to_exit = max(0, exit_ts - ts)
-                lift_threshold = fair + cfg["slope"] * ticks_to_exit
-                for ask_price in sorted(order_depth.sell_orders.keys()):
-                    if ask_price <= lift_threshold and pos < limit:
-                        ask_vol = abs(order_depth.sell_orders[ask_price])
-                        buy_qty = min(ask_vol, limit - pos)
-                        if buy_qty > 0:
-                            orders.append(Order(product, ask_price, buy_qty))
-                            pos += buy_qty
-                if pos < limit:
-                    orders.append(Order(product, best_bid + 1, limit - pos))
+                # Passive-only: post one penny above best bid until we reach target.
+                if pos < target:
+                    orders.append(Order(product, best_bid + 1, target - pos))
 
             result[product] = orders
 
