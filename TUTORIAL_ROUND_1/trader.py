@@ -6,8 +6,8 @@ FAIR_VALUES = {
 }
 
 POSITION_LIMITS = {
-    "EMERALDS": 50,
-    "TOMATOES": 50,
+    "EMERALDS": 80,
+    "TOMATOES": 80,
 }
 
 
@@ -74,9 +74,19 @@ class Trader:
             sell_room = limit + pos
 
             if buy_room > 0:
-                orders.append(Order(product, penny_bid, buy_room))
+                lvl1 = buy_room // 2
+                lvl2 = buy_room - lvl1
+                if lvl1 > 0:
+                    orders.append(Order(product, penny_bid, lvl1))
+                if lvl2 > 0:
+                    orders.append(Order(product, penny_bid - 1, lvl2))
             if sell_room > 0:
-                orders.append(Order(product, penny_ask, -sell_room))
+                lvl1 = sell_room // 2
+                lvl2 = sell_room - lvl1
+                if lvl1 > 0:
+                    orders.append(Order(product, penny_ask, -lvl1))
+                if lvl2 > 0:
+                    orders.append(Order(product, penny_ask + 1, -lvl2))
 
             result[product] = orders
 
