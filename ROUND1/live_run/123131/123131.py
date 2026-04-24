@@ -125,7 +125,18 @@ class Trader:
                 elif pos < 0:
                     orders.append(Order(product, best_bid + 1, -pos))
             else:
-                # Passive-only: post one penny above best bid until we reach target.
+                # Entry: sweep any ask <= fair + slope*ticks_until_exit, then passive bid for rest.
+                fair = compute_fair(product, order_depth, ts, ema_state)
+                exit_ts = 99_000 if ts < 99_000 else 999_000
+                ticks_to_exit = max(0, exit_ts - ts)
+                lift_threshold = fair + cfg["slope"] * ticks_to_exit
+                for ask_price in sorted(order_depth.sell_orders.keys()):
+                    if ask_price <= lift_threshold and pos < target:
+                        ask_vol = abs(order_depth.sell_orders[ask_price])
+                        buy_qty = min(ask_vol, target - pos)
+                        if buy_qty > 0:
+                            orders.append(Order(product, ask_price, buy_qty))
+                            pos += buy_qty
                 if pos < target:
                     orders.append(Order(product, best_bid + 1, target - pos))
 
