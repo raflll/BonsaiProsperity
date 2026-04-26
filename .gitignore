@@ -21,3 +21,5 @@ build/
 
 # Environment
 .env
+
+CLAUDE.md
