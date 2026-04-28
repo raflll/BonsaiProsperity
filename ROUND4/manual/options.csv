@@ -1,0 +1,13 @@
+contract_id,type,strike,barrier,expiry_days,bid,ask,bid_size,ask_size,max_volume,binary_payout,chooser_decision_days
+AETHER_CRYSTAL,underlying,,,,49.975,50.025,200,200,200,,
+AC_50_P,put,50,,21,12.0,12.05,50,50,50,,
+AC_50_C,call,50,,21,12.0,12.05,50,50,50,,
+AC_35_P,put,35,,21,4.33,4.35,50,50,50,,
+AC_40_P,put,40,,21,6.5,6.55,50,50,50,,
+AC_45_P,put,45,,21,9.05,9.1,50,50,50,,
+AC_60_C,call,60,,21,8.8,8.85,50,50,50,,
+AC_50_P_2,put,50,,14,9.7,9.75,50,50,50,,
+AC_50_C_2,call,50,,14,9.7,9.75,50,50,50,,
+AC_50_CO,chooser,50,,21,22.2,22.3,50,50,50,,14
+AC_40_BP,binary_put,40,,21,5,5.1,50,50,50,10,
+AC_45_KO,knockout_put,45,35,21,0.15,0.175,500,500,500,,
